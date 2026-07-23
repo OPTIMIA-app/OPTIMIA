@@ -5711,7 +5711,7 @@ async function confirmEje(){
     if(!lid){toast("Seleccioná el lote","err");return;}
     const c=gAC();
     const dirCult=document.getElementById("eje-cult-dir")?.value||null;
-    const sOT={id:uid(),cid:c.id,lid,labor,momento:mom,cult:dirCult,items:ejeItems.map(it=>({...it})),estado:"generada",nro:"OT-DIR-"+(String(otSeq++).padStart(3,"0")),creadoEn:now(),campana:DB.camp,esDirect:true};
+    const sOT={id:uid(),cid:c.id,lid,labor,momento:mom,cult:dirCult,items:ejeItems.map(it=>({...it})),estado:"generada",nro:"OT-DIR-"+(String(otSeq++).padStart(3,"0")),creadoEn:now(),camp:DB.camp,campana:DB.camp,esDirect:true};
     DB.ots.push(sOT);otid=sOT.id;
     // Sync OT directa a Supabase — con reintento si falla (antes se perdía en silencio).
     // IMPORTANTE: hay que ESPERAR a que esto termine antes de crear la ejecución de abajo,
@@ -8100,6 +8100,7 @@ function guardarAlquilerOTs(loteId){
       labor:"Alquiler",
       momento:cuota.mom,
       campana:DB.camp,
+      camp:DB.camp,
       estado:"generada",
       alqTipo:cuota.tipo,
       alqVal:cuota.val,
@@ -19302,8 +19303,8 @@ function _guardarCatalogoNDVI(lid, items){
 
 // Calcular NDVI promedio de un lote via API de estadísticas
 // ===== SENTINEL HUB CREDENCIALES =====
-const SH_CLIENT_ID     = 'sh-802b3f04-37c6-4261-b4de-d512b962ce05';
-const SH_CLIENT_SECRET = 'vvWEqXB9cnTUQWyP5M6ML9qaHuwsBmvv';
+const SH_CLIENT_ID     = 'sh-7225509d-7ed7-4a3b-bcb0-8e896902a25c';
+const SH_CLIENT_SECRET = 'KPHRSgnSJAHW4v8Cn7qBe7UfN4xGj2qt';
 const SH_INSTANCE_ID   = '443d583f-6530-4b22-8c80-43b70999c10c';
 const SH_PROXY_URL     = 'https://optimia-proxy-btpd.vercel.app/api/sh-proxy';
 
@@ -19328,7 +19329,7 @@ async function calcularNDVIPromedio(lid, fecha){
         timeRange:{from:desde+'T00:00:00Z',to:hasta+'T23:59:59Z'},
         aggregationInterval:{of:'P5D'},
         width:512, height:512,
-        evalscript:'//VERSION=3\nfunction setup(){return{input:[{bands:["B04","B08","dataMask"]}],output:[{id:"ndvi",bands:1,sampleType:"FLOAT32"},{id:"dataMask",bands:1}]};}\nfunction evaluatePixel(s){return{ndvi:[(s.B08-s.B04)/(s.B08+s.B04+0.0001)],dataMask:[s.dataMask]};}'  
+        evalscript:'//VERSION=3\nfunction setup(){return{input:[{bands:["B04","B08","SCL","dataMask"]}],output:[{id:"ndvi",bands:1,sampleType:"FLOAT32"},{id:"dataMask",bands:1}]};}\nfunction evaluatePixel(s){var esNube=(s.SCL==3||s.SCL==8||s.SCL==9||s.SCL==10);var m=esNube?0:s.dataMask;return{ndvi:[(s.B08-s.B04)/(s.B08+s.B04+0.0001)],dataMask:[m]};}'  
       },
       calculations:{ndvi:{histogramBins:50}}
     };
@@ -19721,7 +19722,28 @@ async function _calcularCurvaNDVI(lid){
       if(sEl) sEl.textContent=`${puntos.length} imágenes · ${nNuevo} con valor · ${calculados}/${imgsParaCalc.length}...`;
       if(btnGen) btnGen.textContent=`⏳ ${calculados}/${imgsParaCalc.length}...`;
       _renderNDVIUnif(lid);
-    }catch(e){ console.warn('NDVI calc:',imgP.fecha,e.message); }
+      // Pausa chica entre pedidos, para no superar el límite de pedidos por segundo
+      // del servicio de imágenes satelitales (antes generaba error 429 en curvas largas)
+      await new Promise(r=>setTimeout(r,300));
+    }catch(e){
+      // Si nos pasamos del límite (429), esperar más y reintentar ese mismo, en vez de perderlo
+      if(String(e.message||'').includes('429')){
+        console.warn('NDVI: límite de pedidos alcanzado, esperando 5s antes de seguir...');
+        if(getStats()) getStats().textContent=`⏳ Esperando por límite de pedidos... (${calculados}/${imgsParaCalc.length})`;
+        await new Promise(r=>setTimeout(r,5000));
+        try{
+          const val2 = await calcularNDVIPromedio(lid, imgP.fecha);
+          if(val2!=null){
+            calculados++;
+            let reg2=(DB.ndvi||[]).find(n=>n.lid===lid&&n.fecha===imgP.fecha&&n.camp===DB.camp);
+            if(reg2){ reg2.ndvi_val=val2; } else { if(!DB.ndvi)DB.ndvi=[]; DB.ndvi.push({id:uid(),lid,cid:c?.id,camp:DB.camp,fecha:imgP.fecha,nubosidad:imgP.nubosidad,ndvi_val:val2,fuente:'sh_statistics',cr:new Date().toISOString()}); }
+            save(); imgP.ndvi_val=val2; _renderNDVIUnif(lid);
+          }
+        }catch(e2){ console.warn('NDVI calc (reintento tras 429):',imgP.fecha,e2.message); }
+      } else {
+        console.warn('NDVI calc:',imgP.fecha,e.message);
+      }
+    }
   }
 
   window._ndviCalcActivo=false;
@@ -20107,7 +20129,7 @@ async function _consultarNDVIZona(puntos){
     aggregation:{
       timeRange:{from:desde+'T00:00:00Z',to:hoy+'T23:59:59Z'},
       aggregationInterval:{of:'P30D'},width:256,height:256,
-      evalscript:'//VERSION=3\nfunction setup(){return{input:[{bands:["B04","B08","dataMask"]}],output:[{id:"ndvi",bands:1,sampleType:"FLOAT32"},{id:"dataMask",bands:1}]};}\nfunction evaluatePixel(s){return{ndvi:[(s.B08-s.B04)/(s.B08+s.B04+0.0001)],dataMask:[s.dataMask]};}'
+      evalscript:'//VERSION=3\nfunction setup(){return{input:[{bands:["B04","B08","SCL","dataMask"]}],output:[{id:"ndvi",bands:1,sampleType:"FLOAT32"},{id:"dataMask",bands:1}]};}\nfunction evaluatePixel(s){var esNube=(s.SCL==3||s.SCL==8||s.SCL==9||s.SCL==10);var m=esNube?0:s.dataMask;return{ndvi:[(s.B08-s.B04)/(s.B08+s.B04+0.0001)],dataMask:[m]};}'
     },
     calculations:{ndvi:{histogramBins:10}}
   };
@@ -20241,23 +20263,24 @@ async function calcNDVIPromedioReal(lote, fecha){
         timeRange: { from: desde+'T00:00:00Z', to: hasta+'T23:59:59Z' },
         aggregationInterval: { of: 'P30D' },
         evalscript: `//VERSION=3
-function setup(){ return { input:[{bands:['B04','B08']}], output:[{id:'default',bands:1,sampleType:'FLOAT32'}] }; }
+function setup(){ return { input:[{bands:['B04','B08','SCL']}], output:[{id:'default',bands:1,sampleType:'FLOAT32'},{id:'dataMask',bands:1}] }; }
 function evaluatePixel(s){ 
+  const esNube = (s.SCL==3||s.SCL==8||s.SCL==9||s.SCL==10);
   const ndvi=(s.B08-s.B04)/(s.B08+s.B04);
-  return [isNaN(ndvi)?-999:ndvi];
+  return { default:[isNaN(ndvi)?0:ndvi], dataMask:[esNube?0:1] };
 }`,
         resx: 10, resy: 10
       },
       calculations: { default: { histograms: { default: { nBins: 20, lowEdge: -1.0, highEdge: 1.0 } } } }
     };
     
-    const resp = await fetch('https://services.sentinel-hub.com/api/v1/statistics', {
+    const resp = await fetch(SH_PROXY_URL+'?action=statistics', {
       method:'POST',
-      headers:{ 'Authorization':'Bearer '+token, 'Content-Type':'application/json' },
+      headers:{ 'Content-Type':'application/json' },
       body: JSON.stringify(body)
     });
     
-    if(!resp.ok){ console.warn('Stats API:', resp.status); return null; }
+    if(!resp.ok){ const _t=await resp.text(); console.warn('Stats API (dinámica):', resp.status, _t.slice(0,200)); return null; }
     const data = await resp.json();
     
     const stats = data.data?.[0]?.outputs?.default?.bands?.B0?.stats;
@@ -20295,7 +20318,7 @@ async function getNDVIImageUrl(lote, fecha, escala){
           aggregation:{
             timeRange:{from:desde+'T00:00:00Z',to:fechaStr+'T23:59:59Z'},
             aggregationInterval:{of:'P10D'},width:256,height:256,
-            evalscript:'//VERSION=3\nfunction setup(){return{input:[{bands:["B04","B08","dataMask"]}],output:[{id:"ndvi",bands:1,sampleType:"FLOAT32"},{id:"dataMask",bands:1}]};}\nfunction evaluatePixel(s){return{ndvi:[(s.B08-s.B04)/(s.B08+s.B04+0.0001)],dataMask:[s.dataMask]};}'
+            evalscript:'//VERSION=3\nfunction setup(){return{input:[{bands:["B04","B08","SCL","dataMask"]}],output:[{id:"ndvi",bands:1,sampleType:"FLOAT32"},{id:"dataMask",bands:1}]};}\nfunction evaluatePixel(s){var esNube=(s.SCL==3||s.SCL==8||s.SCL==9||s.SCL==10);var m=esNube?0:s.dataMask;return{ndvi:[(s.B08-s.B04)/(s.B08+s.B04+0.0001)],dataMask:[m]};}'
           },
           calculations:{ndvi:{histogramBins:20}}
         };
@@ -20372,7 +20395,7 @@ function getFechasSiembraLote(lid){
             || (DB.lotes||[]).find(l=>l.id===lid);
   const resultado = [];
   // Solo OTs de la campaña activa del lote
-  const ots = gOTs(lid).filter(o=>o.camp===DB.camp&&(o.labor||'').toLowerCase().includes('siem'));
+  const ots = gOTs(lid).filter(o=>(o.camp||o.campana)===DB.camp&&(o.labor||'').toLowerCase().includes('siem'));
   // Separar por cultivo
   const cult1 = lote?.cult||'';
   const cult2 = lote?.cult2||'';
